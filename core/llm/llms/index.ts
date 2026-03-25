@@ -39,6 +39,7 @@ import LlamaStack from "./LlamaStack";
 import LMStudio from "./LMStudio";
 import Mimo from "./Mimo";
 import MiniMax from "./MiniMax";
+import Mistral from "./Mistral";
 import MockLLM from "./Mock";
 import Moonshot from "./Moonshot";
 import Msty from "./Msty";

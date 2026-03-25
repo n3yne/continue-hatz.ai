@@ -54,7 +54,7 @@ class HatzAI extends BaseLLM {
     return false;
   }
 
-  supportsTool(): "native" | "llm" | undefined {
+  supportsTools(): "native" | "llm" | undefined {
     return "native";
   }
 
@@ -86,9 +86,7 @@ class HatzAI extends BaseLLM {
    * Flattens all content arrays to plain strings, and preserves
    * tool_calls on assistant messages and tool_call_id on tool-result messages.
    */
-  private _convertMessagesForHatz(
-    body: Record<string, unknown>,
-  ): Record<string, unknown> {
+  private _convertMessagesForHatz(body: any): any {
     const messages = (body.messages as ChatMessage[]).map((msg) => {
       const converted: Record<string, unknown> = {
         role: msg.role,
@@ -106,8 +104,8 @@ class HatzAI extends BaseLLM {
           id: tc.id,
           type: tc.type,
           function: {
-            name: tc.function.name,
-            arguments: tc.function.arguments,
+            name: tc.function?.name ?? "",
+            arguments: tc.function?.arguments ?? "{}",
           },
         }));
       }
@@ -127,18 +125,8 @@ class HatzAI extends BaseLLM {
       ...body, // Keep tools, tool_choice, etc.
       messages, // Override with flattened messages
       stream: (body.stream as boolean) ?? false,
-      auto_tool: this.autoTool,
+      ...(this.autoTool && { auto_tool: true }),
     };
-
-    // Map standard parameters
-    if (body.temperature !== undefined) hatzBody.temperature = body.temperature;
-    if (body.top_p !== undefined) hatzBody.top_p = body.top_p;
-    if (body.stop !== undefined) hatzBody.stop = body.stop;
-    if (body.max_tokens !== undefined) hatzBody.max_tokens = body.max_tokens;
-    if (body.frequency_penalty !== undefined)
-      hatzBody.frequency_penalty = body.frequency_penalty;
-    if (body.presence_penalty !== undefined)
-      hatzBody.presence_penalty = body.presence_penalty;
 
     return hatzBody;
   }
