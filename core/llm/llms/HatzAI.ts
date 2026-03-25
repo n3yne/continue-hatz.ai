@@ -27,6 +27,71 @@ function flattenContent(content: MessageContent): string {
   return String(content ?? "");
 }
 
+/**
+ * Types for the OpenAI Responses API wire format
+ */
+interface ResponsesInputTextContent {
+  type: "input_text";
+  text: string;
+}
+
+interface ResponsesOutputTextContent {
+  type: "output_text";
+  text: string;
+}
+
+interface ResponsesUserMessage {
+  role: "user";
+  content: ResponsesInputTextContent[];
+}
+
+interface ResponsesSystemMessage {
+  role: "system" | "developer";
+  content: string;
+}
+
+interface ResponsesAssistantMessage {
+  role: "assistant";
+  content: ResponsesOutputTextContent[];
+}
+
+interface ResponsesFunctionCall {
+  type: "function_call";
+  id: string;
+  call_id: string;
+  name: string;
+  arguments: string;
+}
+
+interface ResponsesFunctionCallOutput {
+  type: "function_call_output";
+  call_id: string;
+  output: string;
+}
+
+type ResponsesInputItem =
+  | ResponsesUserMessage
+  | ResponsesSystemMessage
+  | ResponsesAssistantMessage
+  | ResponsesFunctionCall
+  | ResponsesFunctionCallOutput;
+
+interface ResponsesOutputFunctionCall {
+  type: "function_call";
+  id: string;
+  call_id: string;
+  name: string;
+  arguments: string;
+}
+
+interface ResponsesOutputMessage {
+  type: "message";
+  role: "assistant";
+  content: { type: "output_text"; text: string }[];
+}
+
+type ResponsesOutputItem = ResponsesOutputMessage | ResponsesOutputFunctionCall;
+
 class HatzAI extends BaseLLM {
   static providerName = "hatz";
   static defaultOptions: Partial<LLMOptions> | undefined = {
@@ -82,95 +147,233 @@ class HatzAI extends BaseLLM {
   }
 
   /**
-   * Convert messages to Hatz-compatible format.
-   * Flattens all content arrays to plain strings, and preserves
-   * tool_calls on assistant messages and tool_call_id on tool-result messages.
+   * Get the OpenAI Responses API endpoint.
+   * Per Hatz docs, this is at /v1/openai/responses
    */
-  private _convertMessagesForHatz(body: any): any {
-    const messages = (body.messages as ChatMessage[]).map((msg) => {
-      const converted: Record<string, unknown> = {
-        role: msg.role,
-        content: flattenContent(msg.content),
-      };
-
-      // Preserve tool_calls on assistant messages so the API
-      // can see prior tool-use turns in the conversation
-      if (
-        msg.role === "assistant" &&
-        msg.toolCalls &&
-        msg.toolCalls.length > 0
-      ) {
-        converted.tool_calls = msg.toolCalls.map((tc) => ({
-          id: tc.id,
-          type: tc.type,
-          function: {
-            name: tc.function?.name ?? "",
-            arguments: tc.function?.arguments ?? "{}",
-          },
-        }));
-      }
-
-      // Preserve tool_call_id on tool-result messages
-      if (msg.role === "tool" && "toolCallId" in msg) {
-        converted.tool_call_id = (
-          msg as ChatMessage & { toolCallId: string }
-        ).toolCallId;
-      }
-
-      return converted;
-    });
-
-    // Build Hatz request body
-    const hatzBody: Record<string, unknown> = {
-      ...body, // Keep tools, tool_choice, etc.
-      messages, // Override with flattened messages
-      stream: (body.stream as boolean) ?? false,
-      ...(this.autoTool && { auto_tool: true }),
-    };
-
-    return hatzBody;
+  private _getResponsesEndpoint(): URL {
+    if (!this.apiBase) {
+      throw new Error(
+        "No API base URL provided. Please set the 'apiBase' option in config.yaml",
+      );
+    }
+    return new URL("openai/responses", this.apiBase);
   }
 
-  protected async *_streamChat(
+  /**
+   * Convert Continue ChatMessage[] to OpenAI Responses API input format.
+   *
+   * Mapping:
+   *  - system message     → { role: "system", content: "..." }
+   *  - user message       → { role: "user", content: [{ type: "input_text", text: "..." }] }
+   *  - assistant message  → { role: "assistant", content: [{ type: "output_text", text: "..." }] }
+   *                          + separate function_call items for each toolCall
+   *  - tool message       → { type: "function_call_output", call_id: "...", output: "..." }
+   */
+  private _convertMessagesToResponsesInput(
+    messages: ChatMessage[],
+  ): ResponsesInputItem[] {
+    const input: ResponsesInputItem[] = [];
+
+    for (const msg of messages) {
+      const contentStr = flattenContent(msg.content);
+
+      switch (msg.role) {
+        case "system":
+          input.push({
+            role: "system",
+            content: contentStr,
+          });
+          break;
+
+        case "user":
+          input.push({
+            role: "user",
+            content: [{ type: "input_text", text: contentStr }],
+          });
+          break;
+
+        case "assistant":
+          // Add assistant text content if present
+          if (contentStr) {
+            input.push({
+              role: "assistant",
+              content: [{ type: "output_text", text: contentStr }],
+            });
+          }
+          // Add function_call items for each tool call
+          if (msg.toolCalls && msg.toolCalls.length > 0) {
+            for (const tc of msg.toolCalls) {
+              input.push({
+                type: "function_call",
+                id: tc.id ?? `call_${Date.now()}`,
+                call_id: tc.id ?? `call_${Date.now()}`,
+                name: tc.function?.name ?? "",
+                arguments: tc.function?.arguments ?? "{}",
+              });
+            }
+          }
+          break;
+
+        case "tool": {
+          const toolCallId =
+            "toolCallId" in msg
+              ? (msg as ChatMessage & { toolCallId: string }).toolCallId
+              : "unknown";
+          input.push({
+            type: "function_call_output",
+            call_id: toolCallId,
+            output: contentStr,
+          });
+          break;
+        }
+
+        default:
+          // For any other role, treat as user message
+          input.push({
+            role: "user",
+            content: [{ type: "input_text", text: contentStr }],
+          });
+          break;
+      }
+    }
+
+    return input;
+  }
+
+  /**
+   * Parse OpenAI Responses API output items into ChatMessages.
+   * Returns separate messages: one for text content, one for tool calls.
+   */
+  private _parseResponsesOutput(output: ResponsesOutputItem[]): ChatMessage[] {
+    const results: ChatMessage[] = [];
+    let textContent = "";
+    const toolCalls: {
+      id: string;
+      type: "function";
+      function: { name: string; arguments: string };
+    }[] = [];
+
+    for (const item of output) {
+      if (item.type === "message" && item.content) {
+        for (const part of item.content) {
+          if (part.type === "output_text") {
+            textContent += part.text;
+          }
+        }
+      } else if (item.type === "function_call") {
+        toolCalls.push({
+          id: item.call_id ?? item.id,
+          type: "function",
+          function: {
+            name: item.name,
+            arguments: item.arguments,
+          },
+        });
+      }
+    }
+
+    // Yield text content first if present
+    if (textContent) {
+      results.push({
+        role: "assistant",
+        content: textContent,
+      });
+    }
+
+    // Yield tool calls as a separate message
+    if (toolCalls.length > 0) {
+      results.push({
+        role: "assistant",
+        content: "",
+        toolCalls,
+      });
+    }
+
+    return results;
+  }
+
+  /**
+   * Use the OpenAI Responses API (/v1/openai/responses) for tool-enabled requests.
+   * This endpoint returns structured function_call output items instead of
+   * embedding tool calls as XML in the content string.
+   */
+  private async *_streamChatResponses(
     messages: ChatMessage[],
     signal: AbortSignal,
     options: CompletionOptions,
   ): AsyncGenerator<ChatMessage> {
-    const body = toChatBody(messages, options, {});
+    const input = this._convertMessagesToResponsesInput(messages);
 
-    const hatzBody = this._convertMessagesForHatz(body);
+    const requestBody: Record<string, unknown> = {
+      model: options.model ?? this.model,
+      input,
+      stream: false,
+    };
 
-    // Always use non-streaming for now since Hatz streaming
-    // uses a custom NDJSON format, not OpenAI SSE
-    hatzBody.stream = false;
+    // Include tools
+    if (options.tools && options.tools.length > 0) {
+      requestBody.tools = options.tools.map(
+        (tool: {
+          type: string;
+          function: {
+            name: string;
+            description?: string;
+            parameters?: unknown;
+          };
+        }) => ({
+          type: "function",
+          name: tool.function.name,
+          description: tool.function.description ?? "",
+          parameters: tool.function.parameters ?? {},
+        }),
+      );
+    }
 
-    const response = await this.fetch(this._getEndpoint("chat/completions"), {
+    // Include optional parameters
+    if (options.temperature !== undefined) {
+      requestBody.temperature = options.temperature;
+    }
+    if (options.topP !== undefined) {
+      requestBody.top_p = options.topP;
+    }
+    if (options.maxTokens !== undefined) {
+      requestBody.max_output_tokens = options.maxTokens;
+    }
+
+    const response = await this.fetch(this._getResponsesEndpoint(), {
       method: "POST",
       headers: this._getHeaders(),
-      body: JSON.stringify(hatzBody),
+      body: JSON.stringify(requestBody),
       signal,
     });
 
     if ((response as any).status === 499) {
-      return; // Aborted by user
+      return;
     }
 
     if ((response as any).status >= 400) {
       const errorText = await response.text();
       throw new Error(
-        `Hatz API error ${(response as any).status}: ${errorText}`,
+        `Hatz Responses API error ${(response as any).status}: ${errorText}`,
       );
     }
 
     const data = await response.json();
 
-    if (data.choices?.[0]?.message) {
+    if (data.output && Array.isArray(data.output)) {
+      const chatMessages = this._parseResponsesOutput(
+        data.output as ResponsesOutputItem[],
+      );
+      for (const chatMessage of chatMessages) {
+        yield chatMessage;
+      }
+    } else if (data.choices?.[0]?.message) {
+      // Fallback in case the API returns chat completions format
       const message = data.choices[0].message;
       const chatMessage: ChatMessage = {
         role: "assistant",
         content: message.content ?? "",
       };
-
       if (message.tool_calls && message.tool_calls.length > 0) {
         chatMessage.toolCalls = message.tool_calls.map(
           (tc: {
@@ -187,8 +390,88 @@ class HatzAI extends BaseLLM {
           }),
         );
       }
-
       yield chatMessage;
+    }
+  }
+
+  /**
+   * Convert messages to Hatz-compatible format for /chat/completions.
+   * Flattens all content arrays to plain strings.
+   */
+  private _convertMessagesForHatz(body: any): Record<string, unknown> {
+    const messages = (body.messages as ChatMessage[]).map((msg) => {
+      const converted: Record<string, unknown> = {
+        role: msg.role,
+        content: flattenContent(msg.content),
+      };
+      return converted;
+    });
+
+    const hatzBody: Record<string, unknown> = {
+      ...body,
+      messages,
+      stream: (body.stream as boolean) ?? false,
+      ...(this.autoTool && { auto_tool: true }),
+    };
+
+    return hatzBody;
+  }
+
+  /**
+   * Use /chat/completions for non-tool requests (regular conversation).
+   */
+  private async *_streamChatCompletions(
+    messages: ChatMessage[],
+    signal: AbortSignal,
+    options: CompletionOptions,
+  ): AsyncGenerator<ChatMessage> {
+    const body = toChatBody(messages, options, {});
+    const hatzBody = this._convertMessagesForHatz(body);
+    hatzBody.stream = false;
+
+    const response = await this.fetch(this._getEndpoint("chat/completions"), {
+      method: "POST",
+      headers: this._getHeaders(),
+      body: JSON.stringify(hatzBody),
+      signal,
+    });
+
+    if ((response as any).status === 499) {
+      return;
+    }
+
+    if ((response as any).status >= 400) {
+      const errorText = await response.text();
+      throw new Error(
+        `Hatz API error ${(response as any).status}: ${errorText}`,
+      );
+    }
+
+    const data = await response.json();
+
+    if (data.choices?.[0]?.message) {
+      const message = data.choices[0].message;
+      yield {
+        role: "assistant",
+        content: message.content ?? "",
+      };
+    }
+  }
+
+  /**
+   * Route to the appropriate API based on whether tools are present.
+   * - With tools: use /v1/openai/responses (client-managed tool calling)
+   * - Without tools: use /v1/chat/completions (regular conversation)
+   */
+  protected async *_streamChat(
+    messages: ChatMessage[],
+    signal: AbortSignal,
+    options: CompletionOptions,
+  ): AsyncGenerator<ChatMessage> {
+    if (options.tools && options.tools.length > 0) {
+      yield* this._streamChatResponses(messages, signal, options);
+    } else {
+      yield* this._streamChatCompletions(messages, signal, options);
     }
   }
 
