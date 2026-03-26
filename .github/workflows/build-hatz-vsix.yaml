@@ -14,6 +14,7 @@ jobs:
     outputs:
       has-changes: ${{ steps.check-changes.outputs.has-changes }}
       version: ${{ steps.get-version.outputs.version }}
+      nightly-suffix: ${{ steps.get-version.outputs.nightly-suffix }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -87,7 +88,9 @@ jobs:
         run: |
           VERSION=$(node -p "require('./extensions/vscode/package.json').version")
           DATE=$(date -u +%Y%m%d)
-          echo "version=${VERSION}-nightly.${DATE}" >> $GITHUB_OUTPUT
+          NIGHTLY_SUFFIX="nightly.${DATE}"
+          echo "version=${VERSION}-${NIGHTLY_SUFFIX}" >> $GITHUB_OUTPUT
+          echo "nightly-suffix=${NIGHTLY_SUFFIX}" >> $GITHUB_OUTPUT
 
   build-vsix:
     needs: sync-upstream
@@ -111,6 +114,16 @@ jobs:
         with:
           ref: add-hatz.ai
           fetch-depth: 0
+
+      - name: Stamp nightly version into package.json
+        shell: bash
+        run: |
+          cd extensions/vscode
+          CURRENT_VERSION=$(node -p "require('./package.json').version")
+          NEW_VERSION="${CURRENT_VERSION}-${{ needs.sync-upstream.outputs.nightly-suffix }}"
+          echo "Updating version: $CURRENT_VERSION -> $NEW_VERSION"
+          sed -i.bak "s/\"version\": \"$CURRENT_VERSION\"/\"version\": \"$NEW_VERSION\"/" package.json
+          rm -f package.json.bak
 
       - name: Build VS Code extension
         uses: ./.github/actions/build-vscode-extension

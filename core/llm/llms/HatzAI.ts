@@ -396,16 +396,66 @@ class HatzAI extends BaseLLM {
 
   /**
    * Convert messages to Hatz-compatible format for /chat/completions.
-   * Flattens all content arrays to plain strings.
+   * Flattens all content arrays to plain strings and converts unsupported
+   * roles (tool) to user messages. The Hatz /chat/completions endpoint
+   * only accepts system, user, and assistant roles.
    */
   private _convertMessagesForHatz(body: any): Record<string, unknown> {
-    const messages = (body.messages as ChatMessage[]).map((msg) => {
-      const converted: Record<string, unknown> = {
-        role: msg.role,
-        content: flattenContent(msg.content),
-      };
-      return converted;
-    });
+    const messages = (body.messages as ChatMessage[]).reduce(
+      (acc: Record<string, unknown>[], msg) => {
+        const contentStr = flattenContent(msg.content);
+
+        switch (msg.role) {
+          case "system":
+          case "user":
+            acc.push({ role: msg.role, content: contentStr });
+            break;
+
+          case "assistant": {
+            // Build a text summary including any tool calls
+            let assistantContent = contentStr;
+            if (msg.toolCalls && msg.toolCalls.length > 0) {
+              const toolSummary = msg.toolCalls
+                .map(
+                  (tc) =>
+                    `[Called ${tc.function?.name ?? "tool"}: ${tc.function?.arguments ?? "{}"}]`,
+                )
+                .join("\n");
+              assistantContent = assistantContent
+                ? `${assistantContent}\n${toolSummary}`
+                : toolSummary;
+            }
+            if (assistantContent) {
+              acc.push({ role: "assistant", content: assistantContent });
+            }
+            break;
+          }
+
+          case "tool": {
+            // Convert tool results to user messages
+            const toolName =
+              "toolCallId" in msg
+                ? (msg as ChatMessage & { toolCallId: string }).toolCallId
+                : "tool";
+            acc.push({
+              role: "user",
+              content: `[Tool result from ${toolName}]: ${contentStr}`,
+            });
+            break;
+          }
+
+          default:
+            // Any other role gets converted to user
+            if (contentStr) {
+              acc.push({ role: "user", content: contentStr });
+            }
+            break;
+        }
+
+        return acc;
+      },
+      [],
+    );
 
     const hatzBody: Record<string, unknown> = {
       ...body,
@@ -413,6 +463,10 @@ class HatzAI extends BaseLLM {
       stream: (body.stream as boolean) ?? false,
       ...(this.autoTool && { auto_tool: true }),
     };
+
+    // Remove tool-related fields that /chat/completions doesn't support
+    delete hatzBody.tools;
+    delete hatzBody.tool_choice;
 
     return hatzBody;
   }
