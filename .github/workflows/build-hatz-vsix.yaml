@@ -1,0 +1,156 @@
+name: Nightly Sync & Build
+
+on:
+  schedule:
+    # Run every day at 4:00 AM UTC
+    - cron: "0 4 * * *"
+  workflow_dispatch: # Allows manual trigger from GitHub UI
+
+jobs:
+  sync-upstream:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      has-changes: ${{ steps.check-changes.outputs.has-changes }}
+      version: ${{ steps.get-version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: add-hatz.ai
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream remote
+        run: git remote add upstream https://github.com/continuedev/continue.git || true
+
+      - name: Fetch upstream
+        run: git fetch upstream main
+
+      - name: Check for upstream changes
+        id: check-changes
+        run: |
+          # Check if upstream/main has commits not in add-hatz.ai
+          DIFF_COUNT=$(git rev-list HEAD..upstream/main --count)
+          if [ "$DIFF_COUNT" -gt 0 ]; then
+            echo "has-changes=true" >> $GITHUB_OUTPUT
+            echo "Found $DIFF_COUNT new upstream commits"
+          else
+            echo "has-changes=false" >> $GITHUB_OUTPUT
+            echo "No new upstream commits"
+          fi
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+
+      - name: Merge upstream changes
+        if: steps.check-changes.outputs.has-changes == 'true'
+        run: |
+          git merge upstream/main --no-edit || {
+            echo "::error::Merge conflict detected. Manual resolution required."
+            git merge --abort
+            exit 1
+          }
+
+      - name: Sync lock files
+        run: |
+          # Regenerate lock files to ensure package.json and lock files are in sync
+          cd extensions/vscode && npm install --package-lock-only && cd ../..
+          cd core && npm install --package-lock-only && cd ..
+          cd gui && npm install --package-lock-only && cd ..
+
+          # Commit updated lock files if any changed
+          if git diff --quiet; then
+            echo "Lock files already in sync"
+          else
+            git add -A '**/package-lock.json'
+            git commit -m "chore: sync lock files after upstream merge"
+          fi
+
+      - name: Push changes
+        run: |
+          # Push if there are any commits ahead of remote
+          if [ "$(git rev-list origin/add-hatz.ai..HEAD --count)" -gt 0 ]; then
+            git push origin add-hatz.ai
+          else
+            echo "Nothing to push"
+          fi
+
+      - name: Get version for release tag
+        id: get-version
+        run: |
+          VERSION=$(node -p "require('./extensions/vscode/package.json').version")
+          DATE=$(date -u +%Y%m%d)
+          echo "version=${VERSION}-nightly.${DATE}" >> $GITHUB_OUTPUT
+
+  build-vsix:
+    needs: sync-upstream
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        include:
+          - platform: linux
+            arch: x64
+            runner: ubuntu-latest
+          - platform: win32
+            arch: x64
+            runner: windows-latest
+          - platform: darwin
+            arch: arm64
+            runner: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: add-hatz.ai
+          fetch-depth: 0
+
+      - name: Build VS Code extension
+        uses: ./.github/actions/build-vscode-extension
+        with:
+          platform: ${{ matrix.platform }}
+          arch: ${{ matrix.arch }}
+          npm_config_arch: ${{ matrix.arch }}
+          pre-release: false
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload .vsix artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: continue-hatz-${{ matrix.platform }}-${{ matrix.arch }}
+          path: "extensions/vscode/*.vsix"
+
+  create-release:
+    needs: [sync-upstream, build-vsix]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all VSIX artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: vsix-artifacts
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.sync-upstream.outputs.version }}
+          name: "Nightly ${{ needs.sync-upstream.outputs.version }}"
+          body: |
+            Automated nightly build of Continue with Hatz.AI integration.
+
+            **Upstream synced:** ${{ needs.sync-upstream.outputs.has-changes == 'true' && 'Yes - new changes merged from upstream' || 'No new upstream changes' }}
+
+            Install by downloading the VSIX for your platform and running:
+            ```
+            code --install-extension <filename>.vsix
+            ```
+          files: vsix-artifacts/**/*.vsix
+          prerelease: true

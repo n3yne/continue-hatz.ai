@@ -1388,4 +1388,34 @@ Fund your wallet with USDC on Solana or Base. ClawRouter uses x402 micropayments
     ],
     apiKeyUrl: "https://portal.nousresearch.com",
   },
+  hatz: {
+    title: "Hatz.AI",
+    provider: "hatz",
+    description:
+      "Hatz.AI provides access to leading AI models including Claude, GPT, and Gemini through a unified API.",
+    longDescription:
+      "Hatz.AI is a unified AI gateway that provides access to models from Anthropic, OpenAI, Google, and more through a single API key. To get started, sign up at [hatz.ai](https://www.hatz.ai/) and obtain your API key from the dashboard.",
+    icon: "hatz.png",
+    tags: [ModelProviderTags.RequiresApiKey],
+    collectInputFor: [
+      {
+        inputType: "text",
+        key: "apiKey",
+        label: "API Key",
+        placeholder: "Enter your Hatz.AI API key",
+        required: true,
+      },
+      ...completionParamsInputsConfigs,
+    ],
+    packages: [
+      {
+        ...models.AUTODETECT,
+        params: {
+          ...models.AUTODETECT.params,
+          title: "Hatz.AI",
+        },
+      },
+    ],
+    apiKeyUrl: "https://www.hatz.ai/",
+  },
 };
