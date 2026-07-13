@@ -2,7 +2,7 @@
   "name": "continue",
   "icon": "media/icon.png",
   "author": "Continue Dev, Inc",
-  "version": "1.3.39",
+  "version": "1.3.40",
   "repository": {
     "type": "git",
     "url": "https://github.com/continuedev/continue"
@@ -371,12 +371,6 @@
         "title": "Continue: Reject Jump Suggestion"
       },
       {
-        "command": "continue.generateRule",
-        "category": "Continue",
-        "title": "Generate Rule",
-        "group": "Continue"
-      },
-      {
         "command": "continue.openInNewWindow",
         "category": "Continue",
         "title": "Open in new window",
@@ -523,9 +517,6 @@
         },
         {
           "command": "continue.enterEnterpriseLicenseKey"
-        },
-        {
-          "command": "continue.generateRule"
         },
         {
           "command": "continue.openInNewWindow"
@@ -759,7 +750,6 @@
     "ncp": "^2.0.0",
     "node-fetch": "^3.3.2",
     "node-machine-id": "^1.1.12",
-    "posthog-node": "^3.6.3",
     "react-markdown": "^8.0.7",
     "react-redux": "^8.0.5",
     "read-last-lines": "^1.8.0",

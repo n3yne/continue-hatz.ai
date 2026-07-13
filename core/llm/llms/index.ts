@@ -59,7 +59,6 @@ import SageMaker from "./SageMaker";
 import SambaNova from "./SambaNova";
 import Scaleway from "./Scaleway";
 import SiliconFlow from "./SiliconFlow";
-import ContinueProxy from "./stubs/ContinueProxy";
 import TARS from "./TARS";
 import Tensorix from "./Tensorix";
 import TestLLM from "./Test";
@@ -105,7 +104,6 @@ export const LLMClasses = [
   Groq,
   Fireworks,
   NCompass,
-  ContinueProxy,
   Cloudflare,
   Deepseek,
   Docker,
@@ -187,16 +185,6 @@ export async function llmFromDescription(
     logger: llmLogger,
     uniqueId,
   };
-
-  if (desc.provider === "continue-proxy") {
-    options.apiKey = ideSettings.userToken;
-    if (ideSettings.remoteConfigServerUrl) {
-      options.apiBase = new URL(
-        "/proxy/v1",
-        ideSettings.remoteConfigServerUrl,
-      ).toString();
-    }
-  }
 
   return new cls(options);
 }
