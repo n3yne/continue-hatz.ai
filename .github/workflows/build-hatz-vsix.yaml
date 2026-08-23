@@ -1,4 +1,4 @@
-name: Nightly Sync & Build
+name: Nightly Sync &amp; Build
 
 on:
   workflow_dispatch: # Allows manual trigger from GitHub UI
@@ -136,12 +136,20 @@ jobs:
         with:
           name: continue-hatz-${{ matrix.platform }}-${{ matrix.arch }}
           path: "extensions/vscode/*.vsix"
+          # The create-release job below re-uploads this same file as a permanent
+          # GitHub Release asset right after the build, so the Actions-artifact
+          # copy is redundant the moment that succeeds (and gets purged then —
+          # see the "Purge this run's Actions artifacts" step). This is just a
+          # low bound so a run that never reaches create-release (a failed or
+          # cancelled run) can't quietly sit on 90 days of retention either.
+          retention-days: 3
 
   create-release:
     needs: [sync-upstream, build-vsix]
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      actions: write # needed to delete this run's artifacts in the purge step below
     steps:
       - name: Download all VSIX artifacts
         uses: actions/download-artifact@v4
@@ -164,3 +172,19 @@ jobs:
             ```
           files: vsix-artifacts/**/*.vsix
           prerelease: true
+
+      # The VSIX files now live permanently as Release assets above, so the
+      # per-platform Actions artifacts uploaded by build-vsix are redundant —
+      # purge them immediately instead of letting them sit in Actions storage
+      # for their retention-days window. Only runs after a successful publish,
+      # so a failed release keeps its artifacts around for debugging/retry.
+      - name: Purge this run's Actions artifacts (already on the Release page)
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts" --paginate \
+            -q '.artifacts[].id' | while read -r id; do
+              echo "Deleting artifact $id"
+              gh api -X DELETE "repos/${{ github.repository }}/actions/artifacts/$id"
+            done
