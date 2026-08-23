@@ -1,4 +1,4 @@
-name: Nightly Sync &amp; Build
+name: Nightly Sync & Build
 
 on:
   workflow_dispatch: # Allows manual trigger from GitHub UI
